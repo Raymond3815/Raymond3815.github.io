@@ -494,3 +494,117 @@
 	Object.defineProperty(window, 'QRCode', { value: QRCode, writable: false });
 
 })();
+
+
+// libsodium
+(function(){
+	const loaded_ctx = {rc: -2};
+	const assertLoaded = ()=>{
+		if (loaded_ctx.rc > -2)
+		{
+			if (loaded_ctx.rc == -1)
+			{
+				throw new Error("failed to initiate libsodium");
+			}
+			return;
+		}
+		loaded_ctx.rc = Module.lsodium_init();
+		Object.freeze(loaded_ctx);
+	};
+
+	const scrypt = function(password, salt, N, r, p, outLen){
+		if (!window_event_manager.module_is_loaded) {
+			return new Promise(async (s, e) => {
+				await window_event_manager.moduleLoadedAwaitable();
+				s(scrypt(password, salt, N, r, p));
+			});
+		}
+
+		const dtype_is_str = typeof(salt) == "string";
+		if (dtype_is_str){
+			salt = Utf8.decode(salt);
+		}
+		if (!(salt instanceof Uint8Array)){
+			throw TypeError("salt must be of type Uint8Array");
+		}
+
+		if (typeof(password) == "string"){
+			password = Utf8.decode(password);
+		}
+		if (!(password instanceof Uint8Array)){
+			throw TypeError("password must be of type Uint8Array");
+		}
+
+
+		outLen = outLen || 32;
+		if (!Number.isInteger(outLen) || outLen < 16) {
+			throw RangeError("outLen must be an integer >= 16");
+		}
+		
+		assertLoaded();
+
+		if (!Number.isInteger(N) || !Number.isInteger(r) || !Number.isInteger(p)) {
+			throw TypeError("N, r, p must be integers");
+		}
+		if (N <= 1 || (N & (N - 1)) !== 0) {
+			throw RangeError("N must be a power of 2 greater than 1");
+		}
+		if (r < 1 || p < 1) {
+			throw RangeError("r and p must be >= 1");
+		}
+		if (r > 0xffffffff || p > 0xffffffff) {
+			throw RangeError("r and p must fit in uint32");
+		}
+		if (N >= 2 ** 53) {
+			throw RangeError("N is too large for JS Number");
+		}
+		if (r * p >= 2 ** 30) {
+			throw RangeError("r * p must be < 2^30");
+		}
+
+		const bytes = 128 * N * r;
+		if (!Number.isSafeInteger(bytes) || bytes > 256 * 1024 * 1024) {
+			throw RangeError("scrypt working buffer too large (" + bytes + " bytes)");
+		}
+
+
+		let result = null;
+
+		const passPtr = Module._malloc(password.length);
+		const saltPtr = Module._malloc(salt.length);
+		const outPtr  = Module._malloc(outLen);
+		try {
+			new Uint8Array(Module.HEAPU8.buffer, passPtr, password.length).set(password);
+			new Uint8Array(Module.HEAPU8.buffer, saltPtr, salt.length).set(salt);
+			let data_out_heap = new Uint8Array(Module.HEAPU8.buffer, outPtr, outLen);
+
+			const rc = Module.lsodium_scrypt_ll(
+				passPtr, password.length,
+				saltPtr, salt.length,
+				N, r, p,
+				outPtr, outLen
+			);
+			if (rc !== 0) {
+				throw Error("scrypt_ll failed (rc=" + rc + ")");
+			}
+
+			result = new Uint8Array(data_out_heap.subarray(0, outLen));		
+		} finally {
+			Module._free(passPtr);
+			Module._free(saltPtr);
+			Module._free(outPtr);
+		}
+
+		return dtype_is_str ? Base64.encodeUrl(result) : result;
+	};
+
+
+	const LSodium = { scrypt: scrypt };
+	
+	
+
+	Object.freeze(LSodium);
+
+	Object.defineProperty(window, 'LSodium', {value: LSodium, writable: false});
+
+})();
