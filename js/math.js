@@ -37,7 +37,7 @@ Matrix.prototype.randomFill = function () {
 };
 Matrix.prototype.get = function (i, j) {
     const ij = i * this.n + j;
-    return ij >= size ? null : this.data[ij];
+    return ij >= this.size ? null : this.data[ij];
 };
 
 Matrix.prototype.add = function (scalar, in_place) {
@@ -176,7 +176,7 @@ Matrix.prototype.divMatrix = function (b, in_place) {
     if (!in_place) {
         const sum = new Matrix(this.m, this.n);
         for (var i = 0; i < this.size; i++)
-            sum.data[i] = this.data[i] * b.data[i];
+            sum.data[i] = this.data[i] / b.data[i];
         return sum;
     }
     for (var i = 0; i < this.size; i++)

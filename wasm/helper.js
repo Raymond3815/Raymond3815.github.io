@@ -576,7 +576,6 @@
 		try {
 			new Uint8Array(Module.HEAPU8.buffer, passPtr, password.length).set(password);
 			new Uint8Array(Module.HEAPU8.buffer, saltPtr, salt.length).set(salt);
-			let data_out_heap = new Uint8Array(Module.HEAPU8.buffer, outPtr, outLen);
 
 			const rc = Module.lsodium_scrypt_ll(
 				passPtr, password.length,
@@ -587,8 +586,9 @@
 			if (rc !== 0) {
 				throw Error("scrypt_ll failed (rc=" + rc + ")");
 			}
-
-			result = new Uint8Array(data_out_heap.subarray(0, outLen));		
+			
+			
+			result = new Uint8Array(new Uint8Array(Module.HEAPU8.buffer, outPtr, outLen).subarray(0, outLen));		
 		} finally {
 			Module._free(passPtr);
 			Module._free(saltPtr);

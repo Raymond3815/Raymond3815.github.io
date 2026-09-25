@@ -1,29 +1,51 @@
-const getMasterKey = async function(){
-	const id = window.localStorage.getItem("id") || "SW_RANDOM";
-	const wkp = navigator.language + '-' + id;
-	const wk = await GetWrapKey(wkp, new Uint8Array(1), 1);
-	
-	const lmk = window.localStorage.getItem("master_key");
-	if (!lmk){
-		window.localStorage['id'] = id;
-		const mk = await GenerateKey();
-		QuickNotification("generated master key for this device");
-		window.localStorage["master_key"] = "w=" + (await EncryptKey(wk, mk));
-		return mk;
-	}
-	try{
-		return await DecryptKey(wk, lmk.substr(2));
-	}
-	catch(e)
-	{
-		QuickNotification("Invalid master key", 'e');
-		if (await promptForBoolean("Reset master key", "Yes", "No", false, 15e3)){
-			window.localStorage.removeItem("master_key");
-			return getMasterKey();
-		}
-	}
-	return null;
-};
+
+// KeyStore
+(()=>{
+	const DB_NAME = "keystore";
+	const STORE_NAME = "keys";
+
+	let dbPromise = null;
+
+	const getDatabase = ()=>{
+		if (dbPromise) return dbPromise;
+		dbPromise = new Promise((resolve, reject)=>{
+			const req = indexedDB.open(DB_NAME, 1);
+			req.onupgradeneeded = ()=>{
+				req.result.createObjectStore(STORE_NAME);
+			};
+			req.onsuccess = ()=> resolve(req.result);
+			req.onerror = ()=> reject(req.error);
+		});
+		return dbPromise;
+	};
+
+	const getKey = async(id)=>{
+		const db = await getDatabase();
+		return new Promise((resolve, reject)=>{
+			const tx = db.transaction(STORE_NAME, "readonly");
+			const r = tx.objectStore(STORE_NAME).get(id);
+			r.onsuccess = () => resolve(r.result ?? null);
+    		r.onerror = () => reject(r.error);
+		});
+	};
+
+	const putKey = async(id, value)=>{
+		const db = await getDatabase();
+		return new Promise((resolve, reject)=>{
+			const tx = db.transaction(STORE_NAME, "readwrite");
+			const r = tx.objectStore(STORE_NAME).put(value, id);
+			r.onsuccess = () => resolve();
+    		r.onerror = () => reject(r.error);
+		});
+	};
+
+	const key_db = {
+		get: getKey, store: putKey
+	};
+	Object.freeze(key_db);
+
+	Object.defineProperty(window, 'KeyStore', {value: key_db, writable: false});
+})();
 
 
 function updateAC(){
@@ -325,18 +347,26 @@ async function generateB64Keys(evt){
 
 
 async function listTOTP(evt){
+	const keykey = "totp_master_key";
+	
 	const ob = new OverlayBody();
 	ob.body.style.minWidth = '350px';
 	ob.body.style.width = '80%';
 	
 	
-	const list_totp = await (async()=>{
+	let list_totp = await (async()=>{
 		try{
-			return JSON.parse(Utf8.encode(await ZStandard.decompress(await DecryptMessage(await getMasterKey(), window.localStorage.getItem("list_totp")))));
+
+			const dk = await KeyStore.get(keykey);
+			if (dk)
+			{
+				return JSON.parse(Utf8.encode(await ZStandard.decompress(await DecryptMessage(dk, window.localStorage.getItem("list_totp")))));
+			}
+
 		}
 		catch(e){
 		}
-		return {'totp':{},'passphrase': null};
+		return {};
 	})();
 	
 	
@@ -357,13 +387,20 @@ async function listTOTP(evt){
 		[...listing.children].forEach(RemoveElement);
 		
 		const ct = epochTime();
-		const lst = unpackJSONTable(list_totp.totp).map((e)=>{return {'issuer': e.issuer, 'label': e.label, 'totp': TOTP(Base32.decode(e.secret), ct, e.digits, e.period, 0, e.algorithm.replace('SHA','SHA-')).then((v)=>{
-			v = String(v);
-			while(v.length < e.digits){
-				v = '0' + v;
+		const lst = unpackJSONTable(list_totp).map((e)=>{
+			return {
+				'issuer': e.issuer,
+				'label': e.label, 
+				'totp': TOTP(Base32.decode(e.secret), ct, e.digits, e.period, 0, e.algorithm.replace('SHA','SHA-')).then((v)=>{
+						v = String(v);
+						while(v.length < e.digits){
+							v = '0' + v;
+						}
+						return v;
+					})
+				};
 			}
-			return v;
-		})};});
+		);
 		
 		if (!lst.length){
 			listing.innerHTML = "<p>Nothing imported</p>";
@@ -436,7 +473,13 @@ async function listTOTP(evt){
 		loader.style.display = '';
 		
 		const file = await promptForFile(false);
-		
+		if (!file)
+		{
+			QuickNotification("No file supplied", 'w');
+			loader.style.display = 'none';
+			busy = false;
+			return;
+		}
 		
 		
 		let submitted = false;
@@ -462,9 +505,7 @@ async function listTOTP(evt){
 				pass_input.type = "password";
 			}
 		};
-		if (list_totp.passphrase){
-			pass_input.value = list_totp.passphrase;
-		}
+		
 		
 		d_form.appendChild(pass_input);
 		const submit = document.createElement("div");
@@ -496,13 +537,12 @@ async function listTOTP(evt){
 					throw 1;
 				}
 				
-				const dk = await window.crypto.subtle.importKey("raw", await PBKDF2(pass_input.value, salt, iter, "SHA-1", 256), "AES-GCM", true, ["decrypt"]);
+				const dk = await window.crypto.subtle.importKey("raw", await PBKDF2(pass_input.value, salt, iter, "SHA-1", 256), "AES-GCM", false, ["decrypt", "encrypt"]);
+				await KeyStore.store(keykey, dk);
 				
-				list_totp.totp = packJSONTable(JSON.parse(Utf8.encode(await window.crypto.subtle.decrypt({name: "AES-GCM", iv: iv}, dk, data))));
-				list_totp.passphrase = pass_input.value;
-				
-				
-				window.localStorage['list_totp'] = await EncryptMessage(await getMasterKey(),await ZStandard.compress(Utf8.decode(JSON.stringify(list_totp))));
+				list_totp = packJSONTable(JSON.parse(Utf8.encode(await window.crypto.subtle.decrypt({name: "AES-GCM", iv: iv}, dk, data))));
+								
+				window.localStorage['list_totp'] = await EncryptMessage(dk, await ZStandard.compress(Utf8.decode(JSON.stringify(list_totp))));
 				
 				window.clearTimeout(lf_to);
 				await listingFill();
@@ -519,6 +559,198 @@ async function listTOTP(evt){
 	};
 	ob.body.appendChild(import_andOTP);
 	
+	
+	const import_aegis = document.createElement("div");
+	import_aegis.classList.add("button");
+	import_aegis.innerHTML = "Import from Aegis";
+	import_aegis.style.width = '350px';
+	import_aegis.style.display = 'inline-block';
+	import_aegis.onclick = async()=>{
+		if (busy){
+			QuickNotification("still processing");
+		}
+		busy = true;
+		loader.style.display = '';
+		
+		const file = await promptForFile(false);
+		if (!file)
+		{
+			QuickNotification("No file supplied", 'w');
+			loader.style.display = 'none';
+			busy = false;
+			return;
+		}
+
+		let  a_json = null;
+
+		const decrypt_db = async(key)=>{
+			const msg_data = Base64.decode(a_json.db)
+			const tag_data = Hex.decode(a_json.header.params.tag)
+
+
+			const data = new Uint8Array(msg_data.length + tag_data.length);
+			data.set(msg_data, 0);
+			data.set(tag_data, msg_data.length);
+
+
+			const db_json = JSON.parse(Utf8.encode(new Uint8Array(
+				await window.crypto.subtle.decrypt({
+					name: "AES-GCM",
+					iv: Hex.decode(a_json.header.params.nonce)
+				},key, data)
+			)));
+
+			// convert to known format
+			const entries = db_json.entries.filter(e=>e.type == 'totp').map((entry)=>{
+				
+				
+				return {
+					"issuer": entry.issuer,
+					'label': entry.name,
+					'secret': entry.info.secret,
+					'algorithm': entry.info.algo,
+					'digits': entry.info.digits,
+					'period': entry.info.period,
+				};
+
+			})
+
+			list_totp = packJSONTable(entries);
+			window.localStorage['list_totp'] = await EncryptMessage(key, await ZStandard.compress(Utf8.decode(JSON.stringify(list_totp))));
+			window.clearTimeout(lf_to);
+			await listingFill();
+
+			loader.style.display = 'none';
+			busy = false;
+		};
+
+		try{
+			a_json = JSON.parse(await file.text());
+			if (a_json.version != 1)
+			{
+				throw new Error("unsupported Aegis version");
+			}
+				
+			// try fast decrypt based on existing
+			const pdk = await KeyStore.get(keykey);
+			if (pdk)
+			{
+				try{
+					return decrypt_db(pdk);
+				}
+				catch(e){
+					console.error(e);
+				}
+			}
+		}catch(e)
+		{
+			QuickNotification("failed to decrypt " + String(e), 'e');
+			loader.style.display = 'none';
+			busy = false;
+			console.error(e);
+			return;
+		}
+
+		
+		let submitted = false;
+		const iob = new OverlayBody();
+		iob.removeOverlayCallback = ()=>{
+			if (!submitted){
+				loader.style.display = 'none';
+				busy = false;
+			}
+		};
+		
+		const d_form = document.createElement("form");
+		iob.body.appendChild(d_form);
+		
+		const pass_input = document.createElement("input");
+		pass_input.classList.add('textinput');
+		pass_input.type = "password";
+		pass_input.placeholder = "Passphrase";
+		pass_input.autocomplete = 'off';
+		pass_input.style.width = "280px";
+		pass_input.onchange = ()=>{
+			if (pass_input.type != "password"){
+				pass_input.type = "password";
+			}
+		};
+		
+		
+		d_form.appendChild(pass_input);
+		const submit = document.createElement("div");
+		submit.classList.add("button");
+		submit.innerHTML = "Decrypt";
+		submit.style.marginTop = '10px';
+		submit.style.width = '280px';
+		submit.style.display = 'inline-block';
+		submit.onclick = async()=>{
+			if (pass_input.value.length == 0){
+				QuickNotification('No passphrase', 'w');
+				return;
+			}
+			
+			submitted = true;
+			iob.RemoveOverlay();
+			
+			const fbuffer = await file.arrayBuffer();
+			try{
+				// obtain key from passphrase
+				let dk = null;
+				for (const slot of a_json.header.slots)
+				{
+					if (slot.type != 1)
+					{
+						continue;
+					}
+
+					
+					const pdk = await LSodium.scrypt(pass_input.value, Hex.decode(slot.salt), slot.n, slot.r, slot.p, 256/8);
+
+
+					const msg_data = Hex.decode(slot.key)
+					const tag_data = Hex.decode(slot.key_params.tag);
+
+					const data = new Uint8Array(msg_data.length + tag_data.length);
+					data.set(msg_data, 0);
+					data.set(tag_data, msg_data.length);
+					try{
+						dk = await window.crypto.subtle.importKey("raw", 
+							new Uint8Array(
+								await window.crypto.subtle.decrypt({
+									name: "AES-GCM",
+									iv: Hex.decode(slot.key_params.nonce)
+								},
+								await window.crypto.subtle.importKey("raw", pdk, "AES-GCM", false, ["decrypt"]),
+								data)
+							), "AES-GCM", false, ["encrypt", "decrypt"]
+						);
+						break;
+					}
+					catch(e){}
+				}
+
+				if (!dk)
+				{
+					throw new Error("unable to derive key from passphrase");
+				}
+				await KeyStore.store(keykey, dk);
+
+				return decrypt_db(dk);
+
+			} catch(e){
+
+				QuickNotification("failed to decrypt " + String(e), 'e');
+				console.error(e);
+			}
+			
+			loader.style.display = 'none';
+			busy = false;
+		};
+		iob.body.appendChild(submit);
+		
+	};
+	ob.body.appendChild(import_aegis);
 	
 	
 };

@@ -75,9 +75,9 @@ async function DecodeKey(encoded)
 }
 
 
-async function GenerateKey(use_cbc)
+async function GenerateKey(use_cbc, non_extractable)
 {
-	return await window.crypto.subtle.generateKey({name: use_cbc ? "AES-CBC" : "AES-GCM", length:256}, true, ["encrypt", "decrypt"]);
+	return await window.crypto.subtle.generateKey({name: use_cbc ? "AES-CBC" : "AES-GCM", length:256}, non_extractable ? false : true, ["encrypt", "decrypt"]);
 }
 
 function GenerateSalt()

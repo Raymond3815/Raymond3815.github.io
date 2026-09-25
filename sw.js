@@ -1,21 +1,16 @@
-const cache_name = 'crypto-cache-v3';
+const cache_name = 'crypto-cache-v5';
 const availible_offline = true;
 const min_cache_mime = {
 	"image": 86400,
 	"text": 86400,
 	"application/wasm": 86400,
-	"application/javascript": 3600,
-	'audio': -1
+	"application/javascript": 3600
 };
 const max_cache_count = 10; // max entries per url path
 
 const epochTime = (...args)=>Math.trunc(new Date(...args).getTime() / 1e3);
 const responseTime = (response)=>Math.trunc(new Date(response.headers.get("Date")).getTime() / 1e3);
-const SW_FUNCs = {	
-	"SW_EPOCH": epochTime,
-	"SW_RANDOM": ()=>String(self.crypto.getRandomValues(new Uint32Array(1))[0]),
-	"SW_CACHE": ()=>cache_name
-};
+
 
 const activelyChanging = (()=>{
 	const ac_url = "/ac.json";
@@ -43,11 +38,6 @@ const activelyChanging = (()=>{
 				catch(e){
 				}
 			}
-			else{
-				if (Math.trunc(acr.status_code / 100) != 4){
-					return false;
-				}
-			}
 		} catch(e){}
 		
 		ac_last_updated = epochTime();
@@ -68,24 +58,16 @@ const activelyChanging = (()=>{
 
 
 const forwardResponse = async function(response){
-	const mtype = response.headers.get('content-type');
-	if (mtype.startsWith("text") || mtype.endsWith("/javascript"))
+	const mtype = response.headers.get('content-type') || "";
+	if (mtype && (mtype.startsWith("text") || mtype.endsWith("/javascript")))
 	{
 		const headers = new Headers(response.headers);
 		headers.append('SW_Processed', cache_name);
 		if (!headers.get("cache-control")){
 			headers.append("Cache-control", "no-store");
 		}
-		
-		let body_txt = await response.text();
-		for (const swf in SW_FUNCs){
-			if (body_txt.indexOf(swf) > -1){
-				const nv = String(SW_FUNCs[swf]());
-				body_txt = body_txt.replaceAll(swf, nv);
-			}
-		}
-		
-		return new Response(body_txt, {
+				
+		return new Response(response.body, {
 			status: response.status,
 			statusText: response.statusText,
 			headers: headers
@@ -97,16 +79,15 @@ const forwardResponse = async function(response){
 
 self.addEventListener('activate', async (e) => {
 	console.log('[Service Worker] Activate');
-	const ckeys = await caches.keys();
-	for (const ck of ckeys)
-	{
-		if (ck == cache_name){
-			continue;
-		}
-		await caches.delete(ck);
-	}
-	activelyChanging(-1);
+	e.waitUntil((async () => {
+		const keys = await caches.keys();
+		await Promise.all(keys.filter((k) => k !== cache_name).map((k) => caches.delete(k)));
+		await activelyChanging(-1);
+		await self.clients.claim();
+	})());
 });
+self.addEventListener("install", (e) => e.waitUntil(self.skipWaiting()));
+
 
 async function handleFetch(request, client_id = null){
 	if (["GET", "HEAD"].indexOf(request.method) == -1){
@@ -114,7 +95,9 @@ async function handleFetch(request, client_id = null){
 	}
 	const ctime = epochTime();
 	
-	const ac = activelyChanging(request.url);
+	const u = new URL(request.url);
+	const acKey = u.origin + u.pathname;
+	const ac = activelyChanging(acKey);
 	const cache = await caches.open(cache_name);
 	
 	const r = await cache.match(request);	
@@ -126,7 +109,7 @@ async function handleFetch(request, client_id = null){
 		if (!ac && !r.headers.get("cache-control") && !r.headers.get("vary")){
 			const rtime = responseTime(r);
 			const dtime = ctime - rtime;
-			const mtype = r.headers.get('content-type');
+			const mtype = r.headers.get('content-type') || "";
 			for (const k in min_cache_mime){
 				if (mtype.startsWith(k)){
 					if (dtime < min_cache_mime[k] || min_cache_mime[k] < 0){
@@ -163,12 +146,7 @@ async function handleFetch(request, client_id = null){
 			console.debug('[Service Worker] Caching updating resource:', request.url);
 		}
 		
-		if (['audio', 'video'].indexOf(nr.headers.get('content-type').split('/')[0]) > -1){
-			cache.add(request.url);
-		}
-		else{
-			cache.put(request, nr.clone());
-		}
+		await cache.put(request, nr.clone());
 		return forwardResponse(nr);
 	}
 	catch(e)
@@ -181,19 +159,23 @@ async function handleFetch(request, client_id = null){
 			console.error(e);
 			if (client_id){
 				const client = await clients.get(client_id);
-				client.postMessage("failed to get resource");
+				client?.postMessage("failed to get resource");
 			}
+			
+			return new Response("", { status: 503, statusText: "offline" });
 		}
 	}
 }
 
 
 self.addEventListener('fetch', (e) => {	
-	e.respondWith(handleFetch(e.request));
+	if (e.request.method !== "GET") return; // let browser handle it
+	if (e.request.headers.has("range")) return;
+	
+	e.respondWith(handleFetch(e.request, e.clientId));
 });
 
 self.addEventListener('message', (e) => {
 	const msg = e.data;
 	activelyChanging(-1);
-	// navigator.serviceWorker.controller.postMessage (client call)	
 });
